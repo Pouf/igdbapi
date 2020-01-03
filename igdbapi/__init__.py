@@ -1,1 +1,2 @@
-from . import core, errors, games
+from . import core
+from . import errors

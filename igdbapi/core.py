@@ -13,7 +13,8 @@ import requests
 from . import errors
 from .decorators import Singleton
 
-V1_ENDPOINT = "https://igdbcom-internet-game-database-v1.p.mashape.com/"
+
+V3_ENDPOINT = "https://api-v3.igdb.com/"
 
 
 @Singleton
@@ -22,22 +23,34 @@ class APIClient(object):
     def __init__(self, api_key=None):
         self._api_key = api_key
         self._command = None
-        self._headers = {'Accept': 'application/json; charset=UTF-8', 'X-Mashape-Key': self._api_key}
+        self._data = None
+        self._headers = {'Accept': 'application/json; charset=UTF-8',
+                         'user-key': self._api_key}
         if api_key is None:
             raise ValueError('You must set an API key.')
 
-    def call(self, command, params):
+    def call(self, command, data):
         self._command = command
         base_url = str(self)
-        response = requests.request('GET', base_url,
-                                    params=params,
-                                    headers=self._headers, allow_redirects=False)
+        if data:
+            self._data = '; '.join(data) + ';'
+        else:
+            self._data = ''
+
+        response = requests.post(base_url,
+                                 data=self._data,
+                                 headers=self._headers,
+                                 allow_redirects=False)
         errors.check(response)
         return APIResponse(response.text)
 
     @property
     def command(self):
         return self._command
+
+    @property
+    def data(self):
+        return self._data
 
     @property
     def api_key(self):
@@ -48,7 +61,8 @@ class APIClient(object):
         return self._headers
 
     def __str__(self):
-        return '{endpoint}{resource}'.format(endpoint=V1_ENDPOINT, resource=self._command)
+        v3_endpoint = V3_ENDPOINT
+        return '{v3_endpoint}{self._command}'.format(**locals())
 
 
 class APIResponse(object):
@@ -58,12 +72,16 @@ class APIResponse(object):
         self._response = response
 
     def as_single_result(self):
-        if type(self.json_response()) == list:
-            if len(self.json_response()) == 1:
-                return self.json_response()[0]
+        json_response = self.json_response()
+        if type(json_response) == list:
+            if not json_response:
+                return None
+            elif len(json_response) == 1:
+                return json_response[0]
             else:
-                raise errors.APIError('Expected single result, found {results}'.format(results=len(self._response)))
-        return self.json_response()
+                nb_results = len(json_response)
+                raise errors.APIError('Expected single result, found {nb_results}'.format(**locals()))
+        return json_response
 
     def as_collection(self):
         return self.json_response()
@@ -83,56 +101,35 @@ class APIResponse(object):
         return self._response
 
 
-class FilterPostFix(Enum):
-    """
-    eq Equal: Exact match equal.
-    not_eq Not Equal: Exact match equal.
-    gt Greater than works only on numbers.
-    gte Greater than or equal to works only on numbers.
-    lt Less than works only on numbers.
-    lte Less than or equal to works only on numbers.
-    prefix Prefix of a value only works on strings.
-    exists The value is not null.
-    not_exists The value is null.
-    in The value exists within the (comma separated) array.
-    """
-    Equal = 'eq'
-    Not_Equal = 'not_eq'
-    Greater_than = 'gt'
-    Greater_than_or_equal = 'gte'
-    Less_than = 'lt'
-    Less_than_or_equal = 'lte'
-    Prefix = 'prefix'
-    Not_Null = 'exists'
-    Null = 'not_exists'
-    Within = 'in'
-
-    def __str__(self):
-        return self.value
-
-
-class Filter(namedtuple('filter', 'key, postfix, value')):
-
-    def to_param(self):
-        return {'filter[{}][{}]'.format(self.key, str(self.postfix)): self.value}
-
-
 class APIObject(object):
+    """A base class for all rich Igdb objects.
+    
+    :param object: [description]
+    :type object: [type]
+    :raises ValueError: [description]
+    :return: [description]
+    :rtype: [type]
     """
-    A base class for all rich Igdb objects.
-    """
+    
+    def __init__(self):
+        self._command = None
+        self._id = None
 
     @property
     def id(self):
-        return self._id  # "_id" is set by the child class.
+        return self._id
+
+    @property
+    def command(self):
+        return self._command
 
     def __repr__(self):
+        clsname = self.__class__.__name__
         try:
-            return '<{clsname} "{name}" ({id})>'.format(clsname=self.__class__.__name__,
-                                                        name=_shims.sanitize_for_console(self._name),
-                                                        id=self._id)
+            name = _shims.sanitize_for_console(self._name)
+            return '<{clsname} "{name}" ({self._id})>'.format(**locals())
         except AttributeError:
-            return '<{clsname} ({id})>'.format(clsname=self.__class__.__name__, id=self._id)
+            return '<{clsname} ({self._id})>'.format(**locals())
 
     def __eq__(self, other):
         """
@@ -151,9 +148,51 @@ class APIObject(object):
     def __hash__(self):
         return hash(self.id)
 
-    @staticmethod
-    def print_date(date):
-        return datetime.datetime.fromtimestamp(date).strftime('%c')
+    def find(self, entity=None, fields='*', exclude='', search='', entity_id=None, name='', slug='', filters='', limit=0, sort='', one=False):
+        if entity is None:
+            raise ValueError('Plase specify entity ("game", "platform", etc)')
+        self._command = entity + '/'
+
+        if type(fields) is list:
+            fields = ','.join(map(str, fields))
+
+        data = [
+            'fields {fields}'.format(**locals())
+        ]
+
+        if exclude:
+            data.append('exclude {exclude}'.format(**locals()))
+        if search:
+            data.append('search "{search}"'.format(**locals()))
+        if entity_id is not None:
+             data.append('where id = {entity_id}'.format(**locals()))
+        if name:
+             data.append('where name = "{name}"'.format(**locals()))
+        if slug:
+             data.append('where slug = "{slug}"'.format(**locals()))
+        if filters:
+            data.append(filters)
+        if limit:
+            if limit > 500:
+                print('Limit ({limit}) set to maximum allowed (500).'.format(**locals()))
+                limit = 500
+            data.append('limit {limit}'.format(**locals()))
+        if sort:
+            data.append('sort {sort}'.format(**locals()))
+
+        query = APIClient().call(command=self._command, data=data)
+
+        if one:
+            return query.as_single_result()
+        else:
+            return query.as_collection()
+    
+    def find_one(self, **kwargs):
+        return self.find(**kwargs, one=True)
+
+    def meta(self):
+        command = self._command + '/meta'
+        return APIClient().call(command=command, data={}).as_collection()
 
 
 class _shims:
@@ -185,3 +224,25 @@ class _shims:
         sanitize_for_console = Python2.sanitize_for_console
 
     sanitize_for_console = staticmethod(sanitize_for_console)
+
+
+class ESRB(Enum):
+    """
+    1	RP
+    2	EC
+    3	E
+    4	E10+
+    5	T
+    6	M
+    7	AO
+    """
+    RP = 1
+    EC = 2
+    E = 3
+    E10plus = 4
+    T = 5
+    M = 6
+    AO = 7
+
+    def __str__(self):
+        return self.value
